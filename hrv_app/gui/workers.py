@@ -6,32 +6,84 @@ from ..core.hrv_analysis import analyze_hrv
 from ..core.report_generator import generate_report
 
 
+class FileLoadWorker(QThread):
+    """Background thread for reading a full TFF file (signal + markers)."""
+    finished = pyqtSignal(dict)
+    error = pyqtSignal(str)
+
+    def __init__(self, file_path):
+        super().__init__()
+        self.file_path = file_path
+
+    def run(self):
+        try:
+            file_data = read_tff_file(self.file_path)
+            self.finished.emit(file_data)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class AnalysisWorker(QThread):
     """Background thread for running the full HRV analysis pipeline."""
     progress = pyqtSignal(str)
     finished = pyqtSignal(dict)
     error = pyqtSignal(str)
 
-    def __init__(self, file_path, channel_index=0):
+    def __init__(self, file_path, channel_index=0, file_data=None,
+                 phase_ranges=None):
         super().__init__()
         self.file_path = file_path
         self.channel_index = channel_index
+        self.file_data = file_data
+        self.phase_ranges = phase_ranges
 
     def run(self):
         try:
-            self.progress.emit("讀取 TFF 檔案...")
-            file_data = read_tff_file(self.file_path)
+            if self.file_data is not None:
+                file_data = self.file_data
+            else:
+                self.progress.emit("讀取 TFF 檔案...")
+                file_data = read_tff_file(self.file_path)
 
             self.progress.emit("訊號前處理（濾波 + 降取樣）...")
             ecg_signal = file_data['signal'][:, self.channel_index]
             ecg_processed = preprocess_ecg(ecg_signal,
                                            original_fs=file_data['fs'])
 
-            self.progress.emit("HRV 分析中...")
-            hrv_results = analyze_hrv(ecg_processed, sampling_rate=1000)
-            hrv_results['file_data'] = file_data
+            ds_factor = file_data['fs'] / 1000
+            phases = {}
 
-            self.finished.emit(hrv_results)
+            if self.phase_ranges and any(v is not None for v in self.phase_ranges.values()):
+                for phase_name in ['baseline', 'stress', 'recovery']:
+                    r = self.phase_ranges.get(phase_name)
+                    if r is None:
+                        phases[phase_name] = None
+                        continue
+                    start_ds = int(r[0] / ds_factor)
+                    end_ds = int(r[1] / ds_factor)
+                    segment = ecg_processed[start_ds:end_ds]
+                    self.progress.emit(f"HRV 分析中（{phase_name}）...")
+                    try:
+                        phases[phase_name] = analyze_hrv(segment,
+                                                        sampling_rate=1000)
+                    except Exception:
+                        phases[phase_name] = None
+            else:
+                self.progress.emit("HRV 分析中...")
+                phases['baseline'] = analyze_hrv(ecg_processed,
+                                                 sampling_rate=1000)
+                phases['stress'] = None
+                phases['recovery'] = None
+
+            baseline = phases.get('baseline')
+            metrics = baseline['metrics'] if baseline else {}
+
+            results = {
+                'phases': phases,
+                'metrics': metrics,
+                'file_data': file_data,
+            }
+            self.finished.emit(results)
         except Exception as e:
             self.error.emit(str(e))
 

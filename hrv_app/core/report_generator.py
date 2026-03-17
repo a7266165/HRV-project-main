@@ -15,6 +15,22 @@ def _setup_chinese_font():
     plt.rcParams['axes.unicode_minus'] = False
 
 
+def _phase_metric(hrv_results, phase, key):
+    """Safely extract a metric value from a specific phase result."""
+    phases = hrv_results.get('phases')
+    if phases:
+        phase_data = phases.get(phase)
+        if phase_data and phase_data.get('metrics'):
+            val = phase_data['metrics'].get(key)
+            return val if val is not None else '--'
+    # Backward compat: fall back to top-level metrics for baseline
+    if phase == 'baseline':
+        metrics = hrv_results.get('metrics', {})
+        val = metrics.get(key)
+        return val if val is not None else '--'
+    return '--'
+
+
 def generate_report(output_path, patient_info, hrv_results,
                     analysis_text, recommendation_text):
     """
@@ -84,12 +100,24 @@ def generate_report(output_path, patient_info, hrv_results,
 
     table_data = [
         ['', 'Baseline', 'Stress', 'Recovery'],
-        ['HR', metrics.get('HR_mean', '--'), '', ''],
-        ['SDNN', metrics.get('HRV_SDNN', '--'), '', ''],
-        ['RMSSD', metrics.get('HRV_RMSSD', '--'), '', ''],
-        ['LF', metrics.get('HRV_LF', '--'), '', ''],
-        ['HF', metrics.get('HRV_HF', '--'), '', ''],
-        ['LF/HF', metrics.get('HRV_LF_HF', '--'), '', '']
+        ['HR', _phase_metric(hrv_results, 'baseline', 'HR_mean'),
+               _phase_metric(hrv_results, 'stress', 'HR_mean'),
+               _phase_metric(hrv_results, 'recovery', 'HR_mean')],
+        ['SDNN', _phase_metric(hrv_results, 'baseline', 'HRV_SDNN'),
+                 _phase_metric(hrv_results, 'stress', 'HRV_SDNN'),
+                 _phase_metric(hrv_results, 'recovery', 'HRV_SDNN')],
+        ['RMSSD', _phase_metric(hrv_results, 'baseline', 'HRV_RMSSD'),
+                  _phase_metric(hrv_results, 'stress', 'HRV_RMSSD'),
+                  _phase_metric(hrv_results, 'recovery', 'HRV_RMSSD')],
+        ['LF', _phase_metric(hrv_results, 'baseline', 'HRV_LF'),
+               _phase_metric(hrv_results, 'stress', 'HRV_LF'),
+               _phase_metric(hrv_results, 'recovery', 'HRV_LF')],
+        ['HF', _phase_metric(hrv_results, 'baseline', 'HRV_HF'),
+               _phase_metric(hrv_results, 'stress', 'HRV_HF'),
+               _phase_metric(hrv_results, 'recovery', 'HRV_HF')],
+        ['LF/HF', _phase_metric(hrv_results, 'baseline', 'HRV_LF_HF'),
+                   _phase_metric(hrv_results, 'stress', 'HRV_LF_HF'),
+                   _phase_metric(hrv_results, 'recovery', 'HRV_LF_HF')],
     ]
 
 
