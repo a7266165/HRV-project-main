@@ -7,7 +7,7 @@ from PyQt6.QtCore import Qt
 
 from ..templates import template_data as tmpl_ch
 from ..templates import template_data_Eng as tmpl_en
-from .workers import AnalysisWorker, ReportWorker
+from .workers import AnalysisWorker, FileLoadWorker, ReportWorker
 
 
 class MainWindow(QMainWindow):
@@ -19,6 +19,9 @@ class MainWindow(QMainWindow):
         self.hrv_results = None
         self.worker = None
         self.report_worker = None
+        self.file_load_worker = None
+        self._file_data = None
+        self._raw_markers = None
 
         self._build_ui()
         self._connect_signals()
@@ -51,6 +54,38 @@ class MainWindow(QMainWindow):
 
         file_group.setLayout(file_layout)
         layout.addWidget(file_group)
+
+        # === Marker selection ===
+        self.marker_group = QGroupBox('標記選擇')
+        self.marker_group.setEnabled(False)
+        marker_layout = QVBoxLayout()
+
+        self.marker_list_label = QLabel('尚未載入標記')
+        self.marker_list_label.setWordWrap(True)
+        marker_layout.addWidget(self.marker_list_label)
+
+        phase_grid = QGridLayout()
+        phase_grid.addWidget(QLabel(''), 0, 0)
+        phase_grid.addWidget(QLabel('起始標記'), 0, 1)
+        phase_grid.addWidget(QLabel('結束標記'), 0, 2)
+
+        self.phase_combos = {}
+        for row, (phase_key, phase_label) in enumerate([
+            ('baseline', 'Baseline'),
+            ('stress', 'Stress'),
+            ('recovery', 'Recovery'),
+        ], start=1):
+            phase_grid.addWidget(QLabel(f'{phase_label}:'), row, 0)
+            start_combo = QComboBox()
+            end_combo = QComboBox()
+            phase_grid.addWidget(start_combo, row, 1)
+            phase_grid.addWidget(end_combo, row, 2)
+            self.phase_combos[f'{phase_key}_start'] = start_combo
+            self.phase_combos[f'{phase_key}_end'] = end_combo
+
+        marker_layout.addLayout(phase_grid)
+        self.marker_group.setLayout(marker_layout)
+        layout.addWidget(self.marker_group)
 
         # === Patient info ===
         patient_group = QGroupBox('病患資訊')
@@ -165,45 +200,125 @@ class MainWindow(QMainWindow):
             'TFF Files (*.tff *.TFF);;All Files (*)')
         if path:
             self.file_path_edit.setText(path)
-            self._load_file_info(path)
+            self._load_full_file(path)
 
-    def _load_file_info(self, path):
-        """Read file header only (fast) to populate channel list and exam time."""
-        try:
-            from ..core.tff_reader import read_tff_header
-            header = read_tff_header(path)
+    def _load_full_file(self, path):
+        """Read full TFF file in background to get signal, markers, and header info."""
+        self.analyze_btn.setEnabled(False)
+        self.marker_group.setEnabled(False)
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setVisible(True)
+        self.status_bar.showMessage('讀取檔案中...')
 
-            self.channel_combo.clear()
-            n_channels = header['n_sig']
-            sig_names = header.get('sig_name', [])
-            for i in range(n_channels):
-                name = sig_names[i] if i < len(sig_names) else f'Channel {i}'
-                self.channel_combo.addItem(f'{i}: {name}')
-            self.channel_combo.setEnabled(True)
-            self.analyze_btn.setEnabled(True)
+        self.file_load_worker = FileLoadWorker(path)
+        self.file_load_worker.finished.connect(self._on_file_loaded)
+        self.file_load_worker.error.connect(self._on_file_load_error)
+        self.file_load_worker.start()
 
-            # Auto-fill exam time
-            base_date = header.get('base_date', '')
-            base_time = header.get('base_time', '')
-            self.exam_time_edit.setText(f'{base_date} {base_time}')
+    def _on_file_loaded(self, file_data):
+        """Handle completed file loading — populate channels, markers, exam time."""
+        self._file_data = file_data
+        self.progress_bar.setVisible(False)
 
-            self.status_bar.showMessage(
-                f'檔案載入完成 — {n_channels} 個通道, fs={header["fs"]} Hz',
-                5000)
-        except Exception as e:
-            QMessageBox.critical(self, '錯誤', f'無法讀取檔案:\n{e}')
+        # Populate channel combo
+        self.channel_combo.clear()
+        n_channels = file_data['n_sig']
+        sig_names = file_data.get('sig_name', [])
+        for i in range(n_channels):
+            name = sig_names[i] if i < len(sig_names) else f'Channel {i}'
+            self.channel_combo.addItem(f'{i}: {name}')
+        self.channel_combo.setEnabled(True)
+        self.analyze_btn.setEnabled(True)
+
+        # Auto-fill exam time
+        base_date = file_data.get('base_date', '')
+        base_time = file_data.get('base_time', '')
+        self.exam_time_edit.setText(f'{base_date} {base_time}')
+
+        # Populate markers
+        markers = file_data.get('markers')
+        fs = file_data.get('fs', 1)
+        self._populate_markers(markers, fs)
+
+        self.status_bar.showMessage(
+            f'檔案載入完成 — {n_channels} 個通道, fs={fs} Hz, '
+            f'{len(markers)} 個標記', 5000)
+
+    def _on_file_load_error(self, error_msg):
+        self.progress_bar.setVisible(False)
+        QMessageBox.critical(self, '錯誤', f'無法讀取檔案:\n{error_msg}')
+
+    def _populate_markers(self, markers, fs):
+        """Fill marker combo boxes with time-formatted marker entries."""
+        self._raw_markers = list(markers) if markers is not None else []
+
+        # Build marker label list
+        marker_items = []
+        for i, sample_idx in enumerate(self._raw_markers):
+            time_sec = sample_idx / fs
+            minutes = int(time_sec // 60)
+            seconds = time_sec % 60
+            marker_items.append(f'Marker {i + 1} ({minutes:02d}:{seconds:05.2f})')
+
+        # Update list display
+        if marker_items:
+            self.marker_list_label.setText(
+                '偵測到的標記: ' + ', '.join(marker_items))
+        else:
+            self.marker_list_label.setText('此檔案無標記')
+
+        # Fill combo boxes
+        for combo in self.phase_combos.values():
+            combo.clear()
+            combo.addItem('-- 未選擇 --')
+            for item in marker_items:
+                combo.addItem(item)
+
+        if self._raw_markers:
+            self.marker_group.setEnabled(True)
+        else:
+            self.marker_group.setEnabled(False)
+
+    def _get_phase_ranges(self):
+        """Read combo box selections and return phase ranges as sample indices."""
+        if not self._raw_markers:
+            return None
+        phases = {}
+        for phase in ['baseline', 'stress', 'recovery']:
+            start_idx = self.phase_combos[f'{phase}_start'].currentIndex() - 1
+            end_idx = self.phase_combos[f'{phase}_end'].currentIndex() - 1
+            if start_idx >= 0 and end_idx >= 0:
+                phases[phase] = (self._raw_markers[start_idx],
+                                 self._raw_markers[end_idx])
+            else:
+                phases[phase] = None
+        return phases
 
     def _on_analyze(self):
         path = self.file_path_edit.text()
         if not path:
             return
 
+        phase_ranges = self._get_phase_ranges()
+
+        # Validate: start must be before end for selected phases
+        if phase_ranges:
+            for phase, r in phase_ranges.items():
+                if r is not None and r[0] >= r[1]:
+                    QMessageBox.warning(
+                        self, '標記錯誤',
+                        f'{phase} 的起始標記必須在結束標記之前')
+                    return
+
         channel_idx = self.channel_combo.currentIndex()
         self.analyze_btn.setEnabled(False)
         self.progress_bar.setRange(0, 0)  # indeterminate
         self.progress_bar.setVisible(True)
 
-        self.worker = AnalysisWorker(path, channel_idx)
+        self.worker = AnalysisWorker(
+            path, channel_idx,
+            file_data=self._file_data,
+            phase_ranges=phase_ranges)
         self.worker.progress.connect(
             lambda msg: self.status_bar.showMessage(msg))
         self.worker.finished.connect(self._on_analysis_done)
