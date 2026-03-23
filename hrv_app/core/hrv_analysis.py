@@ -44,6 +44,11 @@ def analyze_hrv(ecg_signal, sampling_rate=1000):
     hrv_hf = _get("HRV_HF")
     hrv_lf_hf = _get("HRV_LFHF")
     hrv_dfa = _get("HRV_DFA_alpha1")
+    hrv_rmssd = _get("HRV_RMSSD")
+
+    hr_mean = None
+    if len(rr_intervals) > 0:
+        hr_mean = round(60 / np.mean(rr_intervals), 2)
 
     # Compute normalized units (LFnu, HFnu)
     if hrv_lf is not None and hrv_hf is not None and (hrv_lf + hrv_hf) > 0:
@@ -62,6 +67,9 @@ def analyze_hrv(ecg_signal, sampling_rate=1000):
             'HRV_DFA_alpha1': hrv_dfa,
             'LFnu': lf_nu,
             'HFnu': hf_nu,
+            'HR_mean': hr_mean,
+            'HRV_RMSSD': hrv_rmssd,
+
         },
         'r_peaks': r_peak_indices,
         'rr_intervals': rr_intervals,

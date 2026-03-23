@@ -11,6 +11,16 @@ import struct
 import numpy as np
 
 
+"""
+Module for reading ME6000 .tff format files.
+
+http://www.biomation.com/kin/me6000.htm
+"""
+import datetime
+import os
+import struct
+import numpy as np
+
 def read_tff_header(file_path):
     """
     Read only the header of a TFF file (fast, no signal data).
@@ -30,28 +40,9 @@ def read_tff_header(file_path):
         'base_date': fields['base_date'],
     }
 
-
 def read_tff_file(file_path):
     """
     High-level wrapper for reading a TFF file.
-
-    Parameters
-    ----------
-    file_path : str
-        Path to the .tff file.
-
-    Returns
-    -------
-    result : dict
-        Dictionary with keys:
-        - 'signal': ndarray, shape (n_samples, n_channels)
-        - 'fs': int, sampling frequency
-        - 'n_sig': int, number of signals
-        - 'sig_name': list of str, channel names
-        - 'base_time': datetime.time
-        - 'base_date': datetime.date
-        - 'markers': ndarray
-        - 'triggers': ndarray
     """
     signal, fields, markers, triggers = rdtff(file_path)
     return {
@@ -65,31 +56,26 @@ def read_tff_file(file_path):
         'triggers': triggers,
     }
 
-
 def rdtff(file_name, cut_end=False):
     """
-    Read values from a tff file.
-
-    Parameters
-    ----------
-    file_name : str
-        Name of the .tff file to read.
-    cut_end : bool, optional
-        If True, cuts out the last sample for all channels. This is for
-        reading files which appear to terminate with the incorrect
-        number of samples (ie. sample not present for all channels).
-
-    Returns
-    -------
-    signal : ndarray
-        A 2d numpy array storing the physical signals from the record.
-    fields : dict
-        A dictionary containing several key attributes of the read record.
-    markers : ndarray
-        A 1d numpy array storing the marker locations.
-    triggers : ndarray
-        A 1d numpy array storing the trigger locations.
+    Read values from a tff file (with `.npz` caching for blazing fast reloads).
     """
+    # 1. 定義快取檔案名稱 (例如: test_data.TFF.npz)
+    cache_file = file_name + '.npz'
+    
+    # 2. 檢查快取是否存在
+    if os.path.exists(cache_file):
+        try:
+            # 僅需讀取 header 獲取欄位資訊
+            with open(file_name, 'rb') as fp:
+                fields, _ = _rdheader(fp)
+            # 載入快取的 NumPy 陣列
+            cached_data = np.load(cache_file)
+            return cached_data['signal'], fields, cached_data['markers'], cached_data['triggers']
+        except Exception as e:
+            print(f"快取載入失敗，將重新解析原始檔案: {e}")
+
+    # 3. 若無快取或載入失敗，執行完整解析
     file_size = os.path.getsize(file_name)
     with open(file_name, 'rb') as fp:
         fields, file_fields = _rdheader(fp)
@@ -99,6 +85,13 @@ def rdtff(file_name, cut_end=False):
                                               bit_width=file_fields['bit_width'],
                                               is_signed=file_fields['is_signed'],
                                               cut_end=cut_end)
+                                              
+    # 4. 解析完成後，自動儲存為快取檔，下次開啟相同檔案直接秒開
+    try:
+        np.savez(cache_file, signal=signal, markers=markers, triggers=triggers)
+    except Exception as e:
+        print(f"快取儲存失敗: {e}")
+        
     return signal, fields, markers, triggers
 
 
@@ -161,36 +154,87 @@ def _rdsignal(fp, file_size, header_size, n_sig, bit_width, is_signed, cut_end):
     fp.seek(header_size)
     signal_size = file_size - header_size
     byte_width = int(bit_width / 8)
-    dtype = str(byte_width)
+    
+    dtype_str = str(byte_width)
     if is_signed:
-        dtype = 'i' + dtype
+        dtype_str = 'i' + dtype_str
     else:
-        dtype = 'u' + dtype
-    dtype = '>' + dtype
-    max_samples = int(signal_size / byte_width)
-    max_samples = max_samples - max_samples % n_sig
-    signal = np.empty(max_samples, dtype=dtype)
-    markers = []
-    triggers = []
-    sample_num = 0
-
-    if cut_end:
-        stop_byte = file_size - n_sig * byte_width + 1
-        while fp.tell() < stop_byte:
-            chunk = fp.read(2)
-            sample_num = _get_sample(fp, chunk, n_sig, dtype, signal, markers, triggers, sample_num)
+        dtype_str = 'u' + dtype_str
+    dtype_str = '>' + dtype_str
+    
+    # 1. 一次性讀取所有二進位資料到記憶體 (避免幾百萬次的磁碟 I/O)
+    raw_bytes = fp.read(signal_size)
+    
+    # 2. 轉換為 NumPy 陣列以利快速檢查
+    raw_data = np.frombuffer(raw_bytes, dtype=dtype_str)
+    
+    # 檢查是否存在 -32768 這個跳脫標記
+    if -32768 not in raw_data:
+        # -----------------------------------------------------------------
+        # 【極速路徑】：檔案中沒有 markers，直接 reshape 返回 (瞬間完成)
+        # -----------------------------------------------------------------
+        n_samples = len(raw_data) - (len(raw_data) % n_sig)
+        signal = raw_data[:n_samples].reshape((-1, n_sig)).copy()
+        markers = np.array([], dtype='int')
+        triggers = np.array([], dtype='int')
+        
+        if cut_end and signal.shape[0] > 0:
+            signal = signal[:-1]
+            
+        return signal, markers, triggers
+        
     else:
-        while True:
-            chunk = fp.read(2)
-            if not chunk:
-                break
-            sample_num = _get_sample(fp, chunk, n_sig, dtype, signal, markers, triggers, sample_num)
-
-    signal = signal[:sample_num]
-    signal = signal.reshape((-1, n_sig))
-    markers = np.array(markers, dtype='int')
-    triggers = np.array(triggers, dtype='int')
-    return signal, markers, triggers
+        # -----------------------------------------------------------------
+        # 【備用路徑】：檔案中有 markers，使用記憶體內指標解析 (避開錯位問題)
+        # -----------------------------------------------------------------
+        max_samples = int(signal_size / byte_width)
+        max_samples = max_samples - max_samples % n_sig
+        
+        # 直接建立正確形狀的 2D Array
+        signal = np.empty((max_samples // n_sig, n_sig), dtype=dtype_str)
+        markers = []
+        triggers = []
+        
+        idx = 0
+        sample_idx = 0  # 以完整樣本(包含所有通道)為單位的 index
+        length = len(raw_bytes)
+        
+        # 預先編譯 struct 提升迴圈內速度
+        unpack_h = struct.Struct('>h').unpack_from
+        unpack_bb = struct.Struct('BB').unpack_from
+        block_size = n_sig * byte_width
+        
+        while idx < length - 1:
+            tag = unpack_h(raw_bytes, idx)[0]
+            if tag == -32768:
+                if idx + 4 > length:
+                    break  # 標記資料不完整
+                escape_type, data_len = unpack_bb(raw_bytes, idx + 2)
+                if escape_type == 1:
+                    markers.append(sample_idx)
+                elif escape_type == 2:
+                    triggers.append(sample_idx)
+                
+                # 跳過這個 marker 區塊: 2 (tag) + 2 (type & len) + data_len + padding
+                skip = 4 + data_len + (data_len % 2)
+                idx += skip
+            else:
+                if idx + block_size > length:
+                    break  # 剩餘資料不足一個完整樣本
+                
+                # 直接從 buffer 拷貝一個完整的樣本區塊到 signal 矩陣
+                signal[sample_idx, :] = np.frombuffer(raw_bytes, dtype=dtype_str, count=n_sig, offset=idx)
+                sample_idx += 1
+                idx += block_size
+                
+        signal = signal[:sample_idx]
+        markers = np.array(markers, dtype='int')
+        triggers = np.array(triggers, dtype='int')
+        
+        if cut_end and signal.shape[0] > 0:
+            signal = signal[:-1]
+            
+        return signal, markers, triggers
 
 
 def _get_sample(fp, chunk, n_sig, dtype, signal, markers, triggers, sample_num):

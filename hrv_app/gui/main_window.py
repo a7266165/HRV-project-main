@@ -108,16 +108,36 @@ class MainWindow(QMainWindow):
         patient_group.setLayout(patient_layout)
         layout.addWidget(patient_group)
 
-        # === HRV Metrics ===
-        metrics_group = QGroupBox('HRV 指標')
-        metrics_layout = QHBoxLayout()
+        # === HRV Metrics (修改為網格顯示三個階段) ===
+        metrics_group = QGroupBox('HRV 指標對照 (Baseline / Stress / Recovery)')
+        metrics_layout = QGridLayout()
 
-        self.metric_labels = {}
-        for name in ['SDNN', 'LF', 'HF', 'LF/HF', 'DFA α1']:
-            lbl = QLabel(f'{name}: --')
+        phases = ['baseline', 'stress', 'recovery']
+        # 定義要顯示的指標名稱 (UI 顯示用)
+        self.display_metrics = ['HR', 'SDNN', 'RMSSD', 'LF', 'HF', 'LF/HF']
+        
+        # 建立表頭 (第一列)
+        metrics_layout.addWidget(QLabel('指標名稱'), 0, 0)
+        for i, p_name in enumerate(['Baseline', 'Stress', 'Recovery'], 1):
+            lbl = QLabel(p_name)
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            metrics_layout.addWidget(lbl)
-            self.metric_labels[name] = lbl
+            lbl.setStyleSheet("font-weight: bold; color: #2E86C1;") # 增加一點顏色區分
+            metrics_layout.addWidget(lbl, 0, i)
+
+        # 建立指標列與數值標籤
+        self.metric_labels = {} # 格式為 { phase: { metric_name: QLabel } }
+        for p in phases:
+            self.metric_labels[p] = {}
+
+        for row, m_name in enumerate(self.display_metrics, 1):
+            # 左側指標名稱
+            metrics_layout.addWidget(QLabel(f"{m_name}:"), row, 0)
+            # 三個階段的數值欄位
+            for col, p in enumerate(phases, 1):
+                lbl = QLabel('--')
+                lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                metrics_layout.addWidget(lbl, row, col)
+                self.metric_labels[p][m_name] = lbl
 
         metrics_group.setLayout(metrics_layout)
         layout.addWidget(metrics_group)
@@ -249,25 +269,23 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, '錯誤', f'無法讀取檔案:\n{error_msg}')
 
     def _populate_markers(self, markers, fs):
-        """Fill marker combo boxes with time-formatted marker entries."""
+        """Fill marker combo boxes with simplified second-based formatting."""
         self._raw_markers = list(markers) if markers is not None else []
 
-        # Build marker label list
+        # 建立標記列表文字
         marker_items = []
         for i, sample_idx in enumerate(self._raw_markers):
             time_sec = sample_idx / fs
-            minutes = int(time_sec // 60)
-            seconds = time_sec % 60
-            marker_items.append(f'Marker {i + 1} ({minutes:02d}:{seconds:05.2f})')
+            # 修改處：僅顯示秒數，保留兩位小數
+            marker_items.append(f'Marker {i + 1} ({time_sec:.2f}秒)')
 
-        # Update list display
+        # 更新 UI 上的標記列表顯示
         if marker_items:
-            self.marker_list_label.setText(
-                '偵測到的標記: ' + ', '.join(marker_items))
+            self.marker_list_label.setText('偵測到的標記: ' + ', '.join(marker_items))
         else:
             self.marker_list_label.setText('此檔案無標記')
 
-        # Fill combo boxes
+        # 填充下拉選單 (Baseline/Stress/Recovery 的起始與結束)
         for combo in self.phase_combos.values():
             combo.clear()
             combo.addItem('-- 未選擇 --')
@@ -327,18 +345,32 @@ class MainWindow(QMainWindow):
 
     def _on_analysis_done(self, results):
         self.hrv_results = results
-        metrics = results['metrics']
+        
+        # UI 名稱與分析數據 Key 的對照表
+        mapping = {
+            'HR': 'HR_mean',
+            'SDNN': 'HRV_SDNN',
+            'RMSSD': 'HRV_RMSSD',
+            'LF': 'HRV_LF',
+            'HF': 'HRV_HF',
+            'LF/HF': 'HRV_LF_HF'
+        }
 
-        self.metric_labels['SDNN'].setText(
-            f'SDNN: {metrics["HRV_SDNN"]}')
-        self.metric_labels['LF'].setText(
-            f'LF: {metrics["HRV_LF"]}')
-        self.metric_labels['HF'].setText(
-            f'HF: {metrics["HRV_HF"]}')
-        self.metric_labels['LF/HF'].setText(
-            f'LF/HF: {metrics["HRV_LF_HF"]}')
-        self.metric_labels['DFA α1'].setText(
-            f'DFA α1: {metrics["HRV_DFA_alpha1"]}')
+        phases = ['baseline', 'stress', 'recovery']
+        
+        for p in phases:
+            # 從結果中取得該階段的 metrics (若無該階段數據則回傳空字典)
+            p_data = results.get('phases', {}).get(p, {})
+            p_metrics = p_data.get('metrics', {})
+            
+            # 如果是 baseline 且 phases 內沒資料，嘗試抓取頂層 metrics (向下相容)
+            if p == 'baseline' and not p_metrics:
+                p_metrics = results.get('metrics', {})
+
+            for ui_name, data_key in mapping.items():
+                val = p_metrics.get(data_key)
+                display_val = str(val) if val is not None else '--'
+                self.metric_labels[p][ui_name].setText(display_val)
 
         self.analyze_btn.setEnabled(True)
         self.export_btn.setEnabled(True)
