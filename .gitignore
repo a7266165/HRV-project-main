@@ -34,3 +34,6 @@ dist/
 *.csv
 *.pdf
 !debug_layout.pdf
+
+# other
+workspace/
