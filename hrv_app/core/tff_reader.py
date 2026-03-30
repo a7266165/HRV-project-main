@@ -57,41 +57,20 @@ def read_tff_file(file_path):
     }
 
 def rdtff(file_name, cut_end=False):
-    """
-    Read values from a tff file (with `.npz` caching for blazing fast reloads).
-    """
-    # 1. 定義快取檔案名稱 (例如: test_data.TFF.npz)
-    cache_file = file_name + '.npz'
-    
-    # 2. 檢查快取是否存在
-    if os.path.exists(cache_file):
-        try:
-            # 僅需讀取 header 獲取欄位資訊
-            with open(file_name, 'rb') as fp:
-                fields, _ = _rdheader(fp)
-            # 載入快取的 NumPy 陣列
-            cached_data = np.load(cache_file)
-            return cached_data['signal'], fields, cached_data['markers'], cached_data['triggers']
-        except Exception as e:
-            print(f"快取載入失敗，將重新解析原始檔案: {e}")
-
-    # 3. 若無快取或載入失敗，執行完整解析
     file_size = os.path.getsize(file_name)
     with open(file_name, 'rb') as fp:
         fields, file_fields = _rdheader(fp)
-        signal, markers, triggers = _rdsignal(fp, file_size=file_size,
-                                              header_size=file_fields['header_size'],
-                                              n_sig=file_fields['n_sig'],
-                                              bit_width=file_fields['bit_width'],
-                                              is_signed=file_fields['is_signed'],
-                                              cut_end=cut_end)
-                                              
-    # 4. 解析完成後，自動儲存為快取檔，下次開啟相同檔案直接秒開
-    try:
-        np.savez(cache_file, signal=signal, markers=markers, triggers=triggers)
-    except Exception as e:
-        print(f"快取儲存失敗: {e}")
-        
+    
+        signal, markers, triggers = _rdsignal(
+            fp, 
+            file_size=file_size,
+            header_size=file_fields['header_size'],
+            n_sig=file_fields['n_sig'],
+            bit_width=file_fields['bit_width'],
+            is_signed=file_fields['is_signed'],
+            cut_end=cut_end
+        )
+    
     return signal, fields, markers, triggers
 
 
