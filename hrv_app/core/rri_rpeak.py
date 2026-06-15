@@ -679,6 +679,17 @@ def rri_detect(
 # Top-level convenience function
 # ===================================================================
 
+def _round2(x):
+    """Round to 2 decimals; return None for None/NaN/non-numeric (UI shows '--')."""
+    try:
+        xf = float(x)
+    except (TypeError, ValueError):
+        return None
+    if np.isnan(xf):
+        return None
+    return round(xf, 2)
+
+
 def analyze_rri(
     ecg_signal: NDArray,
     fs: float = 2500.0,
@@ -742,29 +753,30 @@ def analyze_rri(
     # Cumulative RR times
     rr_times = np.cumsum(rr_clean) if len(rr_clean) > 0 else np.array([])
 
-    # Step 3: build metrics dict
+    # Step 3: build metrics dict (all values rounded to 2 decimals; NaN -> None)
     metrics: Dict[str, Any] = {
-        "HR_mean": hr,
-        "HRV_SDNN": sdnn,
-        "HRV_RMSSD": rmssd,
+        "HR_mean": _round2(hr),
+        "HRV_SDNN": _round2(sdnn),
+        "HRV_RMSSD": _round2(rmssd),
     }
 
-    # Extended HRV metrics (frequency-domain, nonlinear) if available
+    # Extended HRV metrics (frequency-domain, nonlinear) if available.
+    # NOTE: vollmer_hrv expects RR intervals in SECONDS (it builds the time axis
+    # via cumsum(RR)); the correct API is fft_val_fun(...) / DFA(...), exactly as
+    # used by the Vollmer path in hrv_analysis.py.
     if HAS_VH and len(rr_clean) >= 5:
         try:
-            rr_ms = rr_clean * 1000  # vollmer_hrv typically expects ms
-
-            # Frequency domain
-            lf, hf, lf_hf, lfnu, hfnu = vh.freq_domain(rr_ms)
-            metrics["HRV_LF"] = lf
-            metrics["HRV_HF"] = hf
-            metrics["HRV_LF_HF"] = lf_hf
-            metrics["LFnu"] = lfnu
-            metrics["HFnu"] = hfnu
+            # Frequency domain — rr_clean is in seconds; fs is the resample grid (Hz)
+            fft = vh.fft_val_fun(rr_clean, fs)
+            metrics["HRV_LF"] = _round2(fft["LF"])
+            metrics["HRV_HF"] = _round2(fft["HF"])
+            metrics["HRV_LF_HF"] = _round2(fft["LFHFratio"])
+            metrics["LFnu"] = _round2(fft["pLF"])
+            metrics["HFnu"] = _round2(fft["pHF"])
 
             # Nonlinear: DFA alpha1
-            alpha1 = vh.dfa_alpha1(rr_ms)
-            metrics["HRV_DFA_alpha1"] = alpha1
+            alpha1, _ = vh.DFA(rr_clean)
+            metrics["HRV_DFA_alpha1"] = _round2(alpha1)
         except Exception as e:
             warnings.warn(f"Extended HRV computation failed: {e}")
 
