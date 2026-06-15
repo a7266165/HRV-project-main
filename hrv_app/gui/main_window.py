@@ -260,7 +260,7 @@ class MainWindow(QMainWindow):
 
         # Populate channel combo
         self.channel_combo.clear()
-        n_channels = file_data['n_sig']
+        n_channels = file_data.get('n_sig', 0)
         sig_names = file_data.get('sig_name', [])
         for i in range(n_channels):
             name = sig_names[i] if i < len(sig_names) else f'Channel {i}'
@@ -275,12 +275,13 @@ class MainWindow(QMainWindow):
 
         # Populate markers
         markers = file_data.get('markers')
-        fs = file_data.get('fs', 1)
+        fs = file_data.get('fs', 1) or 1
         self._populate_markers(markers, fs)
 
+        n_markers = len(markers) if markers is not None else 0
         self.status_bar.showMessage(
             f'檔案載入完成 — {n_channels} 個通道, fs={fs} Hz, '
-            f'{len(markers)} 個標記', 5000)
+            f'{n_markers} 個標記', 5000)
 
     def _on_file_load_error(self, error_msg):
         self.progress_bar.setVisible(False)
@@ -289,6 +290,8 @@ class MainWindow(QMainWindow):
     def _populate_markers(self, markers, fs):
         """Fill marker combo boxes with simplified second-based formatting."""
         self._raw_markers = list(markers) if markers is not None else []
+        if not fs:  # 防止 fs 為 0/None 造成除以零 (損壞的 TFF 標頭)
+            fs = 1
 
         # 建立標記列表文字
         marker_items = []
@@ -379,13 +382,17 @@ class MainWindow(QMainWindow):
         phases = ['baseline', 'stress', 'recovery']
         
         for p in phases:
-            # 從結果中取得該階段的 metrics (若無該階段數據則回傳空字典)
-            p_data = results.get('phases', {}).get(p, {})
-            p_metrics = p_data.get('metrics', {})
-            
+            # 從結果中取得該階段的 metrics。
+            # 注意: worker 會把未分析的 phase 設為 None (鍵存在、值為 None)，
+            # 故 .get(p, {}) 的預設值 {} 不會生效，必須用 `or {}` 把 None 收斂成空字典；
+            # 否則 None.get('metrics') 會拋 AttributeError，而 slot 內未捕捉的例外
+            # 會讓 PyQt6 直接 abort() (整個視窗消失、無錯誤對話框)。
+            p_data = results.get('phases', {}).get(p) or {}
+            p_metrics = p_data.get('metrics') or {}
+
             # 如果是 baseline 且 phases 內沒資料，嘗試抓取頂層 metrics (向下相容)
             if p == 'baseline' and not p_metrics:
-                p_metrics = results.get('metrics', {})
+                p_metrics = results.get('metrics') or {}
 
             for ui_name, data_key in mapping.items():
                 val = p_metrics.get(data_key)
